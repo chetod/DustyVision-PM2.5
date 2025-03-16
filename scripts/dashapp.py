@@ -3,38 +3,67 @@ from dash import dcc, html, Input, Output, callback
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pycaret.regression import load_model, predict_model
 from datetime import datetime, timedelta
 import numpy as np
+import random
 
-# Load data
-file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\cleandata_vtest_hours.csv"
-df = pd.read_csv(file_path)
-df['timestamp'] = pd.to_datetime(df['timestamp'])
-np.random.seed(42)
-# Load the trained model
-model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\best_model')
+# Load models and data
+pm25_model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\best_model')
+rainfall_model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\rainny_model')
 
-def forecast_next_7_days(model, last_data):
+# Load PM2.5 data
+pm25_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\last_test.csv"
+pm25_df = pd.read_csv(pm25_file_path)
+pm25_df['timestamp'] = pd.to_datetime(pm25_df['timestamp'])
+
+# Load external data for PM2.5
+external_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\cleandata_hours.csv"
+external_data = pd.read_csv(external_file_path)
+external_data['timestamp'] = pd.to_datetime(external_data['timestamp'])
+
+# Load rainfall data
+rainfall_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\raw_data\raindata.csv"
+rainfall_df = pd.read_csv(rainfall_file_path)
+rainfall_df['DATE'] = pd.to_datetime(rainfall_df['DATE'])
+
+# Update PM2.5 color scheme to softer tones
+PM25_LEVELS = {
+    "Good": {"range": (0, 12.0), "color": "#7BC8A4"},  # Soft green
+    "Moderate": {"range": (12.1, 35.4), "color": "#FED766"},  # Soft yellow
+    "Unhealthy for Sensitive Groups": {"range": (35.5, 55.4), "color": "#FE9F5B"},  # Soft orange
+    "Unhealthy": {"range": (55.5, 150.4), "color": "#FA7C7C"},  # Soft red
+    "Very Unhealthy": {"range": (150.5, 250.4), "color": "#B39DDB"},  # Soft purple
+    "Hazardous": {"range": (250.5, float('inf')), "color": "#9E9E9E"}  # Soft gray
+}
+
+def get_pm25_quality(value):
+    for quality, info in PM25_LEVELS.items():
+        if info["range"][0] <= value <= info["range"][1]:
+            return quality
+    return "Hazardous"
+
+def forecast_pm25(model, last_data, external_data):
     last_date = last_data['timestamp'].max()
-    future_hours = [last_date + timedelta(hours=i+1) for i in range(30 * 24)]  # 7 days * 24 hours
-    
+    future_hours = [last_date + timedelta(hours=i+1) for i in range(7 * 24)]  # 7 days * 24 hours
     future_data = []
     current_data = last_data.copy()
     
     for future_hour in future_hours:
         new_row = {'timestamp': future_hour}
         
-        # Calculate mean temperature and humidity from recent data
-        temp_mean = current_data['temperature'].tail(24).mean()
-        humidity_mean = current_data['humidity'].tail(24).mean()
-        
-        # Generate temperature and humidity using normal distribution
-        new_row['temperature'] = np.random.normal(temp_mean, 2)
-        new_row['humidity'] = np.clip(np.random.normal(humidity_mean, 5), 0, 100)
+        # ใช้ค่า temperature และ humidity จาก external_data
+        if future_hour in external_data['timestamp'].values:
+            matched_row = external_data[external_data['timestamp'] == future_hour].iloc[0]
+            new_row['temperature'] = matched_row['temperature']
+            new_row['humidity'] = matched_row['humidity']
+        else:
+            new_row['temperature'] = current_data['temperature'].iloc[-1]  # ใช้ค่าล่าสุดที่มี
+            new_row['humidity'] = current_data['humidity'].iloc[-1]
         
         # Create Lag Features for PM2.5
-        for lag in range(1, 8):
+        for lag in range(1, 4):
             if len(current_data) >= lag:
                 new_row[f'pm_2_5_Lag{lag}'] = current_data['pm_2_5'].iloc[-lag]
             else:
@@ -43,158 +72,210 @@ def forecast_next_7_days(model, last_data):
         # Predict PM2.5 for this hour
         new_df = pd.DataFrame([new_row])
         prediction = predict_model(model, data=new_df)
-        
         new_row['pm_2_5'] = prediction['prediction_label'].iloc[0]
         future_data.append(new_row)
         
         # Add predicted data to current_data for next hour prediction
         current_data = pd.concat([current_data, pd.DataFrame([new_row])], ignore_index=True)
     
+    forecast_df = pd.DataFrame(future_data)
+    
+    # Add additional columns for easier filtering and display
+    forecast_df['date'] = forecast_df['timestamp'].dt.date
+    forecast_df['hour'] = forecast_df['timestamp'].dt.hour
+    forecast_df['day'] = forecast_df['timestamp'].dt.day_name()
+    forecast_df['date_str'] = forecast_df['timestamp'].dt.strftime('%Y-%m-%d')
+    forecast_df['quality'] = forecast_df['pm_2_5'].apply(get_pm25_quality)
+    
+    return forecast_df
+
+def forecast_rainfall(model, user_input_features):
+    """
+    ทำนายปริมาณฝนสำหรับ 7 วันข้างหน้าโดยใช้ค่าที่ผู้ใช้กรอก
+    """
+    # สร้างรายการวันที่สำหรับ 7 วันข้างหน้า (ทุกชั่วโมง)
+    last_date = rainfall_df['DATE'].max()
+    future_hours = [last_date + timedelta(hours=i+1) for i in range(7 * 24)]  # 7 วัน * 24 ชั่วโมง
+    future_data = []
+    
+    # ใช้ค่าที่ผู้ใช้กรอก
+    T2M = user_input_features.get('T2M', 25.0)
+    RH2M = user_input_features.get('RH2M', 70.0)
+    WS10M = user_input_features.get('WS10M', 5.0)
+    WSC = user_input_features.get('WSC', 2.0)
+    
+    # ทำนายปริมาณฝนสำหรับแต่ละชั่วโมง
+    for i, future_hour in enumerate(future_hours):
+        # สุ่มค่าของ feature แต่ละตัวให้แตกต่างกันในแต่ละวัน
+        day_offset = (i // 24) + 1  # คำนวณวันที่ (1-7)
+        
+        new_row = {
+            'DATE': future_hour,
+            'T2M': max(0, T2M + random.uniform(-1, 1) * day_offset),  # สุ่มค่า T2M และป้องกันค่าติดลบ
+            'RH2M': max(0, RH2M + random.uniform(-2, 2) * day_offset),  # สุ่มค่า RH2M และป้องกันค่าติดลบ
+            'WS10M': max(0, WS10M + random.uniform(-0.5, 0.5) * day_offset),  # สุ่มค่า WS10M และป้องกันค่าติดลบ
+            'WSC': max(0, WSC + random.uniform(-0.2, 0.2) * day_offset),  # สุ่มค่า WSC และป้องกันค่าติดลบ
+        }
+        
+        # ทำนายปริมาณฝน
+        prediction_df = pd.DataFrame([new_row])
+        rainfall_prediction = predict_model(model, data=prediction_df)
+        new_row['PRECTOTCORR'] = rainfall_prediction['prediction_label'].iloc[0]
+        
+        # ทำให้ค่าเป็นบวกเสมอ
+        new_row['PRECTOTCORR'] = max(0, new_row['PRECTOTCORR'])
+        
+        future_data.append(new_row)
+    
     return pd.DataFrame(future_data)
 
-# Generate forecast data
-forecast_data = forecast_next_7_days(model, df)
-
-# Add hour and date columns for easier filtering
-forecast_data['date'] = forecast_data['timestamp'].dt.date
-forecast_data['hour'] = forecast_data['timestamp'].dt.hour
-forecast_data['day'] = forecast_data['timestamp'].dt.day_name()
-
-# Define PM2.5 quality levels
-def get_pm25_quality(value):
-    if value <= 12.0:
-        return "Good"
-    elif value <= 35.4:
-        return "Moderate"
-    elif value <= 55.4:
-        return "Unhealthy for Sensitive Groups"
-    elif value <= 150.4:
-        return "Unhealthy"
-    elif value <= 250.4:
-        return "Very Unhealthy"
-    else:
-        return "Hazardous"
-
-forecast_data['quality'] = forecast_data['pm_2_5'].apply(get_pm25_quality)
-
-# Define color mapping for PM2.5 quality
-color_map = {
-    "Good": "#00E400",
-    "Moderate": "#FFFF00",
-    "Unhealthy for Sensitive Groups": "#FF7E00",
-    "Unhealthy": "#FF0000",
-    "Very Unhealthy": "#8F3F97",
-    "Hazardous": "#7E0023"
-}
-
-# Create Dash application with custom CSS
+# Initialize Dash app with custom styling
 app = dash.Dash(
     __name__,
     external_stylesheets=[
-        "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css",
+        "https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap"
     ]
 )
 
-# Define custom CSS
+# Custom CSS with dark theme
 app.index_string = '''
 <!DOCTYPE html>
 <html>
     <head>
         {%metas%}
-        <title>PM2.5 Forecast Dashboard</title>
+        <title>Environmental Forecast Dashboard</title>
         {%favicon%}
         {%css%}
         <style>
-            body {
-                font-family: 'Roboto', sans-serif;
-                margin: 0;
-                background-color: #f5f5f5;
+            :root {
+                --primary-color: #2c3e50;
+                --secondary-color: #3498db;
+                --accent-color: #e74c3c;
+                --background-color: #1a1a1a;
+                --card-background: #2d2d2d;
+                --text-color: #ffffff;
+                --border-color: #404040;
             }
+            
+            body {
+                font-family: 'Prompt', sans-serif;
+                margin: 0;
+                background-color: var(--background-color);
+                color: var(--text-color);
+            }
+            
             .main-container {
-                max-width: 1200px;
+                max-width: 1400px;
                 margin: 0 auto;
                 padding: 20px;
-                background-color: white;
-                box-shadow: 0 0 10px rgba(0,0,0,0.1);
             }
+            
             .header {
-                background: linear-gradient(135deg, #6c7ae0, #3e4491);
-                color: white;
-                padding: 20px;
+                background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+                padding: 25px;
                 text-align: center;
-                border-radius: 5px 5px 0 0;
-                margin-bottom: 20px;
+                border-radius: 10px;
+                margin-bottom: 25px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
             }
+            
             .card {
-                background-color: white;
-                border-radius: 5px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                padding: 15px;
+                background-color: var(--card-background);
+                border-radius: 10px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+                padding: 20px;
+                margin-bottom: 25px;
+                border: 1px solid var(--border-color);
+            }
+            
+            .tab-container {
+                display: flex;
+                background-color: var(--card-background);
+                border-radius: 10px;
+                padding: 10px;
                 margin-bottom: 20px;
             }
+            
+            .tab {
+                flex: 1;
+                padding: 15px;
+                text-align: center;
+                cursor: pointer;
+                border-radius: 8px;
+                transition: all 0.3s ease;
+                color: var(--text-color);
+            }
+            
+            .tab:hover {
+                background-color: var(--secondary-color);
+            }
+            
+            .tab-selected {
+                background-color: var(--secondary-color);
+                color: white;
+            }
+            
+            .input-group {
+                margin-bottom: 15px;
+            }
+            
+            .input-group label {
+                display: block;
+                margin-bottom: 5px;
+                color: var(--text-color);
+            }
+            
+            .input-group input {
+                width: 100%;
+                padding: 8px;
+                border-radius: 5px;
+                border: 1px solid var(--border-color);
+                background-color: var(--card-background);
+                color: var(--text-color);
+            }
+            
+            button {
+                background-color: var(--secondary-color);
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            
+            button:hover {
+                background-color: #2980b9;
+            }
+            
             .chart-container {
-                height: 400px;
-            }
-            .info-box {
-                padding: 15px;
-                background-color: #e3f2fd;
-                border-left: 5px solid #2196f3;
-                border-radius: 3px;
+                background-color: var(--card-background);
+                border-radius: 10px;
+                padding: 20px;
                 margin-bottom: 20px;
             }
-            .info-box h4 {
-                margin-top: 0;
-                color: #1565c0;
+            
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+                background-color: var(--card-background);
             }
-            .footer {
-                text-align: center;
-                padding: 15px;
-                color: #555;
-                font-size: 0.9em;
-                margin-top: 30px;
-                border-top: 1px solid #ddd;
+            
+            th, td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid var(--border-color);
+                color: var(--text-color);
             }
-            .quality-indicator {
-                display: inline-block;
-                width: 15px;
-                height: 15px;
-                border-radius: 50%;
-                margin-right: 5px;
+            
+            th {
+                background-color: var(--primary-color);
             }
-            .quality-legend {
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: center;
-                margin: 10px 0;
-            }
-            .quality-item {
-                display: flex;
-                align-items: center;
-                margin: 5px 10px;
-            }
-            .stat-card {
-                background: white;
-                padding: 15px;
-                border-radius: 5px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                text-align: center;
-            }
-            .stat-value {
-                font-size: 24px;
-                font-weight: bold;
-                margin: 10px 0;
-            }
-            .stat-label {
-                color: #666;
-            }
-            .stat-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                gap: 15px;
-                margin-bottom: 20px;
-            }
-            .date-picker-container {
-                margin-bottom: 20px;
+            
+            tr:hover {
+                background-color: rgba(52, 152, 219, 0.1);
             }
         </style>
     </head>
@@ -209,234 +290,434 @@ app.index_string = '''
 </html>
 '''
 
-# Create the app layout
+# App Layout
 app.layout = html.Div(className='main-container', children=[
     html.Div(className='header', children=[
-        html.H1("PM2.5 Forecast Dashboard", style={'margin-bottom': '5px'}),
-        html.P("7-day prediction of PM2.5 levels with hourly breakdown")
+        html.H1("Environmental Forecast Dashboard", style={'margin-bottom': '5px'}),
+        html.P("7-Day Forecast for PM2.5 and Rainfall")
     ]),
     
-    html.Div(className='info-box', children=[
-        html.H4("PM2.5 Air Quality Index"),
-        html.Div(className='quality-legend', children=[
-            html.Div(className='quality-item', children=[
-                html.Div(className='quality-indicator', style={'background-color': color}) for color in color_map.values()
+    # Main Tabs
+    html.Div(className='tab-container', children=[
+        html.Div(id='pm25-tab', className='tab tab-selected', children=[
+            html.I(className="fas fa-wind", style={'margin-right': '8px'}),
+            "PM2.5 Forecast"
+        ]),
+        html.Div(id='rainfall-tab', className='tab', children=[
+            html.I(className="fas fa-cloud-rain", style={'margin-right': '8px'}),
+            "Rainfall Forecast"
+        ])
+    ]),
+    
+    # PM2.5 Section
+    html.Div(id='pm25-content', className='content', children=[
+        html.Div(className='card', children=[
+            html.Div(style={'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center', 'margin-bottom': '20px'}, children=[
+                html.H3("PM2.5 7-Day Forecast", style={'margin': '0', 'color': '#fff'}),
+                html.Div(className='quality-legend', style={'display': 'flex', 'gap': '10px'}, children=[
+                    html.Div(style={'display': 'flex', 'align-items': 'center'}, children=[
+                        html.Div(style={'width': '12px', 'height': '12px', 'borderRadius': '50%', 'backgroundColor': color['color'], 'marginRight': '5px'}),
+                        html.Span(level, style={'fontSize': '12px', 'color': '#fff'})
+                    ]) for level, color in PM25_LEVELS.items()
+                ])
             ]),
-            html.Div(className='quality-item', children=[
-                html.Span(level, style={'margin-right': '15px'}) for level in color_map.keys()
-            ])
+            dcc.Graph(id='pm25-forecast-graph')
+        ]),
+        html.Div(className='card', children=[
+            html.Div(style={'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center', 'margin-bottom': '20px'}, children=[
+                html.H3("Hourly Breakdown", style={'margin': '0', 'color': '#fff'}),
+                dcc.DatePickerSingle(
+                    id='date-picker',
+                    min_date_allowed=datetime.now().date(),
+                    max_date_allowed=datetime.now().date() + timedelta(days=7),
+                    initial_visible_month=datetime.now().date(),
+                    date=datetime.now().date(),
+                    style={'backgroundColor': 'var(--card-background)'}
+                )
+            ]),
+            dcc.Graph(id='pm25-hourly-graph')
         ])
     ]),
     
-    html.Div(className='stat-grid', children=[
-        html.Div(className='stat-card', children=[
-            html.I(className="fas fa-calendar-alt", style={'color': '#3e4491', 'font-size': '24px'}),
-            html.Div(className='stat-value', id='forecast-days'),
-            html.Div(className='stat-label', children="Days Forecasted")
+    # Rainfall Section
+    html.Div(id='rainfall-content', className='content', style={'display': 'none'}, children=[
+        html.Div(className='card', children=[
+            html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'gap': '20px'}, children=[
+                html.Div(className='input-group', children=[
+                    html.Label("Temperature (°C):"),
+                    dcc.Input(id='temp-input', type='number', value=25, step=0.1)
+                ]),
+                html.Div(className='input-group', children=[
+                    html.Label("Relative Humidity (%):"),
+                    dcc.Input(id='humidity-input', type='number', value=70, step=0.1)
+                ]),
+                html.Div(className='input-group', children=[
+                    html.Label("Wind Speed at 10m (m/s):"),
+                    dcc.Input(id='wind-speed-input', type='number', value=5, step=0.1)
+                ]),
+                html.Div(className='input-group', children=[
+                    html.Label("Wind Speed Component (m/s):"),
+                    dcc.Input(id='wind-component-input', type='number', value=2, step=0.1)
+                ])
+            ]),
+            html.Button('Generate Forecast', id='forecast-button', n_clicks=0)
         ]),
-        html.Div(className='stat-card', children=[
-            html.I(className="fas fa-wind", style={'color': '#3e4491', 'font-size': '24px'}),
-            html.Div(className='stat-value', id='avg-pm25'),
-            html.Div(className='stat-label', children="Average PM2.5")
+        html.Div(className='card', children=[
+            dcc.Graph(id='rainfall-forecast-graph')
         ]),
-        html.Div(className='stat-card', children=[
-            html.I(className="fas fa-exclamation-triangle", style={'color': '#3e4491', 'font-size': '24px'}),
-            html.Div(className='stat-value', id='max-pm25'),
-            html.Div(className='stat-label', children="Max PM2.5")
-        ]),
-        html.Div(className='stat-card', children=[
-            html.I(className="fas fa-check-circle", style={'color': '#3e4491', 'font-size': '24px'}),
-            html.Div(className='stat-value', id='min-pm25'),
-            html.Div(className='stat-label', children="Min PM2.5")
+        html.Div(className='card', children=[
+            dcc.Graph(id='daily-rainfall-summary')
         ])
     ]),
     
-    html.Div(className='card', children=[
-        html.H3("Daily PM2.5 Forecast", style={'margin-top': '0'}),
-        html.P("Click on a day to see hourly breakdown", style={'color': '#666'}),
-        dcc.Graph(id='7-day-forecast', className='chart-container')
-    ]),
-    
-    html.Div(className='card', children=[
-        html.H3("Hourly PM2.5 Breakdown", style={'margin-top': '0'}),
-        html.P("Select a date to view hourly forecast", style={'color': '#666'}),
-        html.Div(className='date-picker-container', children=[
-            dcc.DatePickerSingle(
-                id='date-picker',
-                min_date_allowed=forecast_data['date'].min(),
-                max_date_allowed=forecast_data['date'].max(),
-                initial_visible_month=forecast_data['date'].min(),
-                date=forecast_data['date'].min()
-            )
-        ]),
-        dcc.Graph(id='hourly-forecast', className='chart-container')
-    ]),
-    
-    html.Div(className='footer', children=[
-        html.P("PM2.5 Forecast Dashboard © 2025"),
-        html.P("Powered by PyCaret and Dash")
-    ])
+    # Store components for state management
+    dcc.Store(id='active-tab', data='pm25'),
+    dcc.Interval(id='pm25-update', interval=3600000)  # Update every hour
 ])
 
-# Callback for statistics
+# Callbacks
 @app.callback(
-    [Output('forecast-days', 'children'),
-     Output('avg-pm25', 'children'),
-     Output('max-pm25', 'children'),
-     Output('min-pm25', 'children')],
-    [Input('date-picker', 'date')]
+    [Output('pm25-tab', 'className'),
+     Output('rainfall-tab', 'className'),
+     Output('pm25-content', 'style'),
+     Output('rainfall-content', 'style'),
+     Output('active-tab', 'data')],
+    [Input('pm25-tab', 'n_clicks'),
+     Input('rainfall-tab', 'n_clicks')],
+    [dash.dependencies.State('active-tab', 'data')]
 )
-def update_stats(date):
-    days = len(forecast_data['date'].unique())
-    avg_pm25 = f"{forecast_data['pm_2_5'].mean():.1f}"
-    max_pm25 = f"{forecast_data['pm_2_5'].max():.1f}"
-    min_pm25 = f"{forecast_data['pm_2_5'].min():.1f}"
-    return days, avg_pm25, max_pm25, min_pm25
+def update_tabs(pm25_clicks, rainfall_clicks, active_tab):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return 'tab tab-selected', 'tab', {'display': 'block'}, {'display': 'none'}, 'pm25'
+    
+    clicked_tab = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    if clicked_tab == 'pm25-tab':
+        return 'tab tab-selected', 'tab', {'display': 'block'}, {'display': 'none'}, 'pm25'
+    else:
+        return 'tab', 'tab tab-selected', {'display': 'none'}, {'display': 'block'}, 'rainfall'
 
-# Callback for 7-day forecast chart
 @app.callback(
-    Output('7-day-forecast', 'figure'),
-    [Input('date-picker', 'date')]
+    [Output('pm25-forecast-graph', 'figure'),
+     Output('pm25-hourly-graph', 'figure')],
+    [Input('pm25-update', 'n_intervals'),
+     Input('date-picker', 'date')]
 )
-def update_7_day_forecast(date):
-    # Group by date and calculate daily averages
+def update_pm25_graphs(n, selected_date):
+    # Generate PM2.5 forecast
+    forecast_data = forecast_pm25(pm25_model, pm25_df, external_data)
+    
+    # Daily forecast graph
     daily_forecast = forecast_data.groupby('date').agg({
-        'pm_2_5': 'mean',
+        'pm_2_5': ['mean', 'max', 'min'],
+        'temperature': ['mean', 'max', 'min'],
+        'humidity': ['mean', 'max', 'min'],
         'quality': lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
     }).reset_index()
     
-    # Create a color list based on the quality values
-    colors = [color_map[quality] for quality in daily_forecast['quality']]
+    # Flatten multi-level columns
+    daily_forecast.columns = ['date', 'pm25_mean', 'pm25_max', 'pm25_min', 
+                            'temp_mean', 'temp_max', 'temp_min',
+                            'humidity_mean', 'humidity_max', 'humidity_min', 'quality']
     
-    # Create figure with custom marker colors
-    fig = go.Figure()
+    colors = [PM25_LEVELS[quality]['color'] for quality in daily_forecast['quality']]
     
-    # Add line and markers
-    fig.add_trace(go.Scatter(
-        x=daily_forecast['date'],
-        y=daily_forecast['pm_2_5'],
-        mode='lines+markers',
-        name='PM2.5',
-        line=dict(width=3, color='#3e4491'),
-        marker=dict(size=12, color=colors, line=dict(width=2, color='#3e4491'))
-    ))
+    # Create daily forecast figure
+    daily_fig = make_subplots(rows=2, cols=1,
+                             shared_xaxes=True,
+                             vertical_spacing=0.1,
+                             subplot_titles=("PM2.5 Levels", "Environmental Conditions"))
     
-    # Add quality annotations
-    for i, row in daily_forecast.iterrows():
-        fig.add_annotation(
-            x=row['date'],
-            y=row['pm_2_5'],
-            text=f"{row['pm_2_5']:.1f}",
-            showarrow=False,
-            yshift=15,
-            font=dict(size=12, color="#3e4491")
-        )
-    
-    # Customize layout
-    fig.update_layout(
-        title=None,
-        xaxis_title="Date",
-        yaxis_title="PM2.5 (μg/m³)",
-        template="plotly_white",
-        hoverlabel=dict(bgcolor="white", font_size=12),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=40, t=20, b=40),
-        height=400
+    # Add PM2.5 bars with gradient fill
+    daily_fig.add_trace(
+        go.Bar(x=daily_forecast['date'],
+               y=daily_forecast['pm25_mean'],
+               name='PM2.5',
+               marker=dict(
+                   color=colors,
+                   line=dict(color=colors, width=1)
+               ),
+               error_y=dict(
+                   type='data',
+                   symmetric=False,
+                   array=daily_forecast['pm25_max'] - daily_forecast['pm25_mean'],
+                   arrayminus=daily_forecast['pm25_mean'] - daily_forecast['pm25_min'],
+                   color='rgba(255,255,255,0.3)'
+               ),
+               hovertemplate="<b>%{x}</b><br>" +
+                           "PM2.5: %{y:.1f} μg/m³<br>" +
+                           "Max: %{error_y.array:.1f}<br>" +
+                           "Min: %{error_y.arrayminus:.1f}<br>" +
+                           "<extra></extra>"),
+        row=1, col=1
     )
     
-    return fig
-
-# Callback for hourly forecast chart
-@app.callback(
-    Output('hourly-forecast', 'figure'),
-    [Input('date-picker', 'date')]
-)
-def update_hourly_forecast(date):
-    if date is None:
-        date = forecast_data['date'].min()
+    # Add temperature area
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['temp_max'],
+                  name='Temperature Range',
+                  line=dict(color='rgba(0,0,0,0)'),
+                  showlegend=False),
+        row=2, col=1
+    )
     
-    # Convert string date to datetime.date
-    if isinstance(date, str):
-        selected_date = datetime.strptime(date, '%Y-%m-%d').date()
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['temp_min'],
+                  name='Temperature',
+                  fill='tonexty',
+                  fillcolor='rgba(255,152,0,0.2)',
+                  line=dict(color='rgba(255,152,0,0.', width=2),
+                  hovertemplate="<b>%{x}</b><br>" +
+                              "Temperature: %{y:.1f}°C<br>" +
+                              "<extra></extra>"),
+        row=2, col=1
+    )
+    
+    # Add humidity area
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['humidity_max'],
+                  name='Humidity Range',
+                  line=dict(color='rgba(0,0,0,0)'),
+                  showlegend=False),
+        row=2, col=1
+    )
+    
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['humidity_min'],
+                  name='Humidity',
+                  fill='tonexty',
+                  fillcolor='rgba(0,188,212,0.2)',
+                  line=dict(color='rgba(0,188,212,0.', width=2),
+                  hovertemplate="<b>%{x}</b><br>" +
+                              "Humidity: %{y:.1f}%<br>" +
+                              "<extra></extra>"),
+        row=2, col=1
+    )
+    
+    # Add reference lines for air quality levels
+    for level, info in PM25_LEVELS.items():
+        if info['range'][1] != float('inf'):
+            daily_fig.add_shape(
+                type="line",
+                x0=daily_forecast['date'].min(),
+                y0=info['range'][1],
+                x1=daily_forecast['date'].max(),
+                y1=info['range'][1],
+                line=dict(color=info['color'], width=1, dash="dot"),
+                row=1, col=1
+            )
+            daily_fig.add_annotation(
+                x=daily_forecast['date'].max(),
+                y=info['range'][1],
+                text=level,
+                showarrow=False,
+                xanchor="left",
+                xshift=10,
+                font=dict(size=10, color=info['color']),
+                row=1, col=1
+            )
+    
+    # Update layout
+    daily_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        height=600,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor='rgba(0,0,0,0.5)'
+        ),
+        margin=dict(l=40, r=40, t=60, b=40)
+    )
+    
+    daily_fig.update_xaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='rgba(255,255,255,0.1)',
+        title_text="Date",
+        row=2, col=1
+    )
+    
+    daily_fig.update_yaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='rgba(255,255,255,0.1)',
+        title_text="PM2.5 (μg/m³)",
+        row=1, col=1
+    )
+    
+    daily_fig.update_yaxes(
+        showgrid=True,
+        gridwidth=1,
+        gridcolor='rgba(255,255,255,0.1)',
+        title_text="Value",
+        row=2, col=1
+    )
+    
+    # Hourly forecast graph
+    if selected_date:
+        selected_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
+        hourly_data = forecast_data[forecast_data['date'] == selected_date]
     else:
-        selected_date = date
+        hourly_data = forecast_data[forecast_data['date'] == forecast_data['date'].min()]
     
-    # Filter data for selected date
-    hourly_data = forecast_data[forecast_data['date'] == selected_date].copy()
+    hourly_fig = go.Figure()
     
-    # Create figure
-    fig = go.Figure()
+    # Add bars for PM2.5 levels with quality colors
+    hourly_fig.add_trace(
+        go.Bar(x=hourly_data['hour'],
+               y=hourly_data['pm_2_5'],
+               name='PM2.5',
+               marker=dict(
+                   color=[PM25_LEVELS[q]['color'] for q in hourly_data['quality']],
+                   line=dict(color=[PM25_LEVELS[q]['color'] for q in hourly_data['quality']], width=1)
+               ),
+               hovertemplate="Hour: %{x}:00<br>" +
+                           "PM2.5: %{y:.1f} μg/m³<br>" +
+                           "Quality: %{text}<br>" +
+                           "<extra></extra>",
+               text=hourly_data['quality'])
+    )
     
-    # Add bar chart for PM2.5 levels
-    fig.add_trace(go.Bar(
-        x=hourly_data['hour'],
-        y=hourly_data['pm_2_5'],
-        name='PM2.5',
-        marker_color=[color_map[q] for q in hourly_data['quality']],
-        hovertemplate='Hour: %{x}<br>PM2.5: %{y:.1f} μg/m³<br>Quality: %{text}<extra></extra>',
-        text=hourly_data['quality']
-    ))
+    # Add smooth line for trend
+    hourly_fig.add_trace(
+        go.Scatter(x=hourly_data['hour'],
+                  y=hourly_data['pm_2_5'],
+                  mode='lines',
+                  line=dict(shape='spline', color='rgba(255,255,255,0.5)', width=2),
+                  name='Trend',
+                  hoverinfo='skip')
+    )
     
-    # Add line for better visualization
-    fig.add_trace(go.Scatter(
-        x=hourly_data['hour'],
-        y=hourly_data['pm_2_5'],
-        mode='lines',
-        line=dict(color='#3e4491', width=2),
-        showlegend=False,
-        hoverinfo='skip'
-    ))
+    # Add reference lines
+    for level, info in PM25_LEVELS.items():
+        if info['range'][1] != float('inf'):
+            hourly_fig.add_shape(
+                type="line",
+                x0=-0.5,
+                y0=info['range'][1],
+                x1=23.5,
+                y1=info['range'][1],
+                line=dict(color=info['color'], width=1, dash="dot")
+            )
     
-    # Customize layout
-    day_name = hourly_data['day'].iloc[0] if not hourly_data.empty else ""
-    fig.update_layout(
-        title=f"Hourly PM2.5 Forecast for {day_name}, {selected_date}",
+    # Update layout
+    hourly_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        title=f"Hourly PM2.5 Levels - {hourly_data['day'].iloc[0]}, {selected_date}",
         xaxis=dict(
             title="Hour of Day",
             tickmode='array',
-            tickvals=list(range(0, 24, 2)),  # Show every 2 hours
-            ticktext=[f"{h}:00" for h in range(0, 24, 2)]  # Format as HH:00
+            tickvals=list(range(0, 24, 2)),
+            ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(255,255,255,0.1)'
         ),
-        yaxis_title="PM2.5 (μg/m³)",
-        template="plotly_white",
-        hoverlabel=dict(bgcolor="white", font_size=12),
-        barmode='relative',
+        yaxis=dict(
+            title="PM2.5 (μg/m³)",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='rgba(255,255,255,0.1)'
+        ),
+        height=400,
+        showlegend=False,
         margin=dict(l=40, r=40, t=80, b=40),
+        hovermode='x unified'
+    )
+    
+    return daily_fig, hourly_fig
+
+@app.callback(
+    [Output('rainfall-forecast-graph', 'figure'),
+     Output('daily-rainfall-summary', 'figure')],
+    [Input('forecast-button', 'n_clicks')],
+    [Input('temp-input', 'value'),
+     Input('humidity-input', 'value'),
+     Input('wind-speed-input', 'value'),
+     Input('wind-component-input', 'value')]
+)
+def update_rainfall_graphs(n_clicks, temp, humidity, wind_speed, wind_component):
+    if n_clicks == 0:
+        return {}, {}
+    
+    # Generate rainfall forecast
+    user_input = {
+        'T2M': temp,
+        'RH2M': humidity,
+        'WS10M': wind_speed,
+        'WSC': wind_component
+    }
+    
+    forecast_df = forecast_rainfall(rainfall_model, user_input)
+    
+    # Hourly rainfall plot
+    hourly_fig = go.Figure()
+    
+    hourly_fig.add_trace(
+        go.Scatter(x=forecast_df['DATE'],
+                  y=forecast_df['PRECTOTCORR'],
+                  fill='tozeroy',
+                  name='Rainfall',
+                  line=dict(color='#3498db'))
+    )
+    
+    hourly_fig.update_layout(
+        template="plotly_dark",
+        title="Hourly Rainfall Forecast",
+        xaxis_title="Time",
+        yaxis_title="Rainfall (mm)",
         height=400
     )
     
-    # Add horizontal reference lines for air quality levels
-    reference_levels = [
-        (12.0, "Good", "#00E400"),
-        (35.4, "Moderate", "#FFFF00"),
-        (55.4, "Unhealthy for Sensitive Groups", "#FF7E00"),
-        (150.4, "Unhealthy", "#FF0000"),
-        (250.4, "Very Unhealthy", "#8F3F97")
-    ]
+    # Daily summary
+    forecast_df['DATE_DAY'] = forecast_df['DATE'].dt.date
+    daily_summary = forecast_df.groupby('DATE_DAY').agg({
+        'PRECTOTCORR': ['sum', 'mean', 'max']
+    }).reset_index()
     
-    for level, label, color in reference_levels:
-        fig.add_shape(
-            type="line",
-            x0=-0.5,
-            y0=level,
-            x1=23.5,
-            y1=level,
-            line=dict(color=color, width=1, dash="dash"),
-        )
-        fig.add_annotation(
-            x=23.5,
-            y=level,
-            xref="x",
-            yref="y",
-            text=label,
-            showarrow=False,
-            xanchor="right",
-            font=dict(size=10, color=color),
-            bgcolor="rgba(255, 255, 255, 0.7)",
-            borderpad=2
-        )
+    daily_fig = go.Figure()
     
-    return fig
+    daily_fig.add_trace(
+        go.Bar(x=daily_summary['DATE_DAY'],
+               y=daily_summary['PRECTOTCORR']['sum'],
+               name='Total Daily Rainfall',
+               marker_color='#3498db')
+    )
+    
+    daily_fig.add_trace(
+        go.Scatter(x=daily_summary['DATE_DAY'],
+                  y=daily_summary['PRECTOTCORR']['max'],
+                  name='Max Hourly Rainfall',
+                  mode='lines+markers',
+                  line=dict(color='#e74c3c'))
+    )
+    
+    daily_fig.update_layout(
+        template="plotly_dark",
+        title="Daily Rainfall Summary",
+        xaxis_title="Date",
+        yaxis_title="Rainfall (mm)",
+        height=400,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    return hourly_fig, daily_fig
 
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    print("Starting the dashboard server...")
+    print("Please open http://127.0.0.1:8050 in your web browser")
+    app.run_server(debug=True, host='0.0.0.0', port=8050) 

@@ -9,35 +9,42 @@ from datetime import datetime, timedelta
 import numpy as np
 
 # Load data
-file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\cleandata_vtest_hours.csv"
+file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\last_test.csv"
 df = pd.read_csv(file_path)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
-np.random.seed(42)
+
 # Load the trained model
 model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\best_model')
+np.random.seed(42)
 
-def forecast_next_7_days(model, last_data):
+def forecast_next_7_days(model, last_data, external_data):
     last_date = last_data['timestamp'].max()
-    future_hours = [last_date + timedelta(hours=i+1) for i in range(30 * 24)]  # 30 days * 24 hours
-    
+    future_hours = [last_date + timedelta(hours=i+1) for i in range(7 * 24)]  # 7 days * 24 hours
     future_data = []
     current_data = last_data.copy()
     
     for future_hour in future_hours:
         new_row = {'timestamp': future_hour}
         
-        # Calculate mean temperature and humidity from recent data
-        temp_mean = current_data['temperature'].tail(24).mean()
-        humidity_mean = current_data['humidity'].tail(24).mean()
+        # ใช้ค่า temperature และ humidity จาก external_data
+        if future_hour in external_data['timestamp'].values:
+            matched_row = external_data[external_data['timestamp'] == future_hour].iloc[0]
+            new_row['temperature'] = matched_row['temperature']
+            new_row['humidity'] = matched_row['humidity']
+        else:
+            new_row['temperature'] = current_data['temperature'].iloc[-1]  # ใช้ค่าล่าสุดที่มี
+            new_row['humidity'] = current_data['humidity'].iloc[-1]
         
-        # Generate temperature and humidity using normal distribution
-        new_row['temperature'] = np.random.normal(temp_mean, 2)
-        new_row['humidity'] = np.clip(np.random.normal(humidity_mean, 5), 0, 100)
+        # Create Lag Features for PM2.5
+        # for lag in range(1, 4):
+        #     if len(current_data) >= lag:
+        #         new_row[f'pm_2_5_Lag{lag}'] = current_data['pm_2_5'].iloc[-lag]
+        #     else:
+        #         new_row[f'pm_2_5_Lag{lag}'] = current_data['pm_2_5'].mean()
         
         # Predict PM2.5 for this hour
         new_df = pd.DataFrame([new_row])
         prediction = predict_model(model, data=new_df)
-        
         new_row['pm_2_5'] = prediction['prediction_label'].iloc[0]
         future_data.append(new_row)
         
@@ -46,8 +53,13 @@ def forecast_next_7_days(model, last_data):
     
     return pd.DataFrame(future_data)
 
+# โหลด external data ที่มีค่า temperature และ humidity
+external_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\cleandata_hours.csv"
+external_data = pd.read_csv(external_file_path)
+external_data['timestamp'] = pd.to_datetime(external_data['timestamp'])
+
 # Generate forecast data
-forecast_data = forecast_next_7_days(model, df)
+forecast_data = forecast_next_7_days(model, df, external_data)
 
 # Add hour and date columns for easier filtering
 forecast_data['date'] = forecast_data['timestamp'].dt.date
