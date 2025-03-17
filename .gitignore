@@ -1,37 +1,26 @@
+# Ignore virtual environment
+.venv/
+venv/
 
-*.pyc
-*.log
-.venv
-
-# Ignore model files
-models/*.pkl
-
-# Ignore data files
-dataforecast/*.csv
-!dataforecast/raw_data/
-
-dataforecast/raw_data/*.csv
-!dataforecast/raw_data/raindata.csv
-
-# Ignore Jupyter Notebook checkpoints
-*.ipynb_checkpoints/
-
-# Ignore Python cache files
+# Ignore compiled Python files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Ignore temporary or backup files
-*.bak
-*.tmp
-*.swp
-*.swo
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
 
-# Ignore scripts
-scripts/*.csv
-scripts/*.py
-!scripts/dash3app.py
-!scripts/dashapp.py
-!scripts/dashapp2.py
-!scripts/test1.py
+# Ignore logs
+logs.log
+logs/
+
+# Ignore models
+models/*.pkl
+
+# Ignore dependency environment
+requirements.txt.lock
+
+# Ignore system files
+.DS_Store
+Thumbs.db

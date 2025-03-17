@@ -28,14 +28,14 @@ rainfall_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\r
 rainfall_df = pd.read_csv(rainfall_file_path)
 rainfall_df['DATE'] = pd.to_datetime(rainfall_df['DATE'])
 
-# Update PM2.5 color scheme to softer tones
+# PM2.5 quality levels and colors
 PM25_LEVELS = {
-    "Good": {"range": (0, 12.0), "color": "#7BC8A4"},  # Soft green
-    "Moderate": {"range": (12.1, 35.4), "color": "#FED766"},  # Soft yellow
-    "Unhealthy for Sensitive Groups": {"range": (35.5, 55.4), "color": "#FE9F5B"},  # Soft orange
-    "Unhealthy": {"range": (55.5, 150.4), "color": "#FA7C7C"},  # Soft red
-    "Very Unhealthy": {"range": (150.5, 250.4), "color": "#B39DDB"},  # Soft purple
-    "Hazardous": {"range": (250.5, float('inf')), "color": "#9E9E9E"}  # Soft gray
+    "Good": {"range": (0, 12.0), "color": "#00E400"},
+    "Moderate": {"range": (12.1, 35.4), "color": "#FFFF00"},
+    "Unhealthy for Sensitive Groups": {"range": (35.5, 55.4), "color": "#FF7E00"},
+    "Unhealthy": {"range": (55.5, 150.4), "color": "#FF0000"},
+    "Very Unhealthy": {"range": (150.5, 250.4), "color": "#8F3F97"},
+    "Hazardous": {"range": (250.5, float('inf')), "color": "#7E0023"}
 }
 
 def get_pm25_quality(value):
@@ -50,6 +50,13 @@ def forecast_pm25(model, last_data, external_data):
     future_data = []
     current_data = last_data.copy()
     
+    # คำนวณค่าเฉลี่ยและส่วนเบี่ยงเบนมาตรฐานจากข้อมูล 7 วันที่ผ่านมา
+    past_7_days_data = current_data[current_data['timestamp'] >= (last_date - timedelta(days=7))]
+    mean_temperature = past_7_days_data['temperature'].mean()
+    std_temperature = past_7_days_data['temperature'].std()
+    mean_humidity = past_7_days_data['humidity'].mean()
+    std_humidity = past_7_days_data['humidity'].std()
+    
     for future_hour in future_hours:
         new_row = {'timestamp': future_hour}
         
@@ -59,15 +66,9 @@ def forecast_pm25(model, last_data, external_data):
             new_row['temperature'] = matched_row['temperature']
             new_row['humidity'] = matched_row['humidity']
         else:
-            new_row['temperature'] = current_data['temperature'].iloc[-1]  # ใช้ค่าล่าสุดที่มี
-            new_row['humidity'] = current_data['humidity'].iloc[-1]
-        
-        # Create Lag Features for PM2.5
-        for lag in range(1, 4):
-            if len(current_data) >= lag:
-                new_row[f'pm_2_5_Lag{lag}'] = current_data['pm_2_5'].iloc[-lag]
-            else:
-                new_row[f'pm_2_5_Lag{lag}'] = current_data['pm_2_5'].mean()
+            # สุ่มค่า temperature และ humidity โดยใช้การแจกแจงปกติ
+            new_row['temperature'] = np.random.normal(mean_temperature, std_temperature)
+            new_row['humidity'] = np.random.normal(mean_humidity, std_humidity)
         
         # Predict PM2.5 for this hour
         new_df = pd.DataFrame([new_row])
@@ -294,7 +295,7 @@ app.index_string = '''
 app.layout = html.Div(className='main-container', children=[
     html.Div(className='header', children=[
         html.H1("Environmental Forecast Dashboard", style={'margin-bottom': '5px'}),
-        html.P("7-Day Forecast for PM2.5 and Rainfall")
+        html.P("7-Day Forecast for PM2.5 and Precipitation in Surat thani")
     ]),
     
     # Main Tabs
@@ -305,36 +306,16 @@ app.layout = html.Div(className='main-container', children=[
         ]),
         html.Div(id='rainfall-tab', className='tab', children=[
             html.I(className="fas fa-cloud-rain", style={'margin-right': '8px'}),
-            "Rainfall Forecast"
+            "Precipitation Forecast"
         ])
     ]),
     
     # PM2.5 Section
     html.Div(id='pm25-content', className='content', children=[
         html.Div(className='card', children=[
-            html.Div(style={'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center', 'margin-bottom': '20px'}, children=[
-                html.H3("PM2.5 7-Day Forecast", style={'margin': '0', 'color': '#fff'}),
-                html.Div(className='quality-legend', style={'display': 'flex', 'gap': '10px'}, children=[
-                    html.Div(style={'display': 'flex', 'align-items': 'center'}, children=[
-                        html.Div(style={'width': '12px', 'height': '12px', 'borderRadius': '50%', 'backgroundColor': color['color'], 'marginRight': '5px'}),
-                        html.Span(level, style={'fontSize': '12px', 'color': '#fff'})
-                    ]) for level, color in PM25_LEVELS.items()
-                ])
-            ]),
             dcc.Graph(id='pm25-forecast-graph')
         ]),
         html.Div(className='card', children=[
-            html.Div(style={'display': 'flex', 'justify-content': 'space-between', 'align-items': 'center', 'margin-bottom': '20px'}, children=[
-                html.H3("Hourly Breakdown", style={'margin': '0', 'color': '#fff'}),
-                dcc.DatePickerSingle(
-                    id='date-picker',
-                    min_date_allowed=datetime.now().date(),
-                    max_date_allowed=datetime.now().date() + timedelta(days=7),
-                    initial_visible_month=datetime.now().date(),
-                    date=datetime.now().date(),
-                    style={'backgroundColor': 'var(--card-background)'}
-                )
-            ]),
             dcc.Graph(id='pm25-hourly-graph')
         ])
     ]),
@@ -401,10 +382,9 @@ def update_tabs(pm25_clicks, rainfall_clicks, active_tab):
 @app.callback(
     [Output('pm25-forecast-graph', 'figure'),
      Output('pm25-hourly-graph', 'figure')],
-    [Input('pm25-update', 'n_intervals'),
-     Input('date-picker', 'date')]
+    [Input('pm25-update', 'n_intervals')]
 )
-def update_pm25_graphs(n, selected_date):
+def update_pm25_graphs(n):
     # Generate PM2.5 forecast
     forecast_data = forecast_pm25(pm25_model, pm25_df, external_data)
     
@@ -423,42 +403,44 @@ def update_pm25_graphs(n, selected_date):
     
     colors = [PM25_LEVELS[quality]['color'] for quality in daily_forecast['quality']]
     
-    # Create daily forecast figure
     daily_fig = make_subplots(rows=2, cols=1,
                              shared_xaxes=True,
                              vertical_spacing=0.1,
-                             subplot_titles=("PM2.5 Levels", "Environmental Conditions"))
+                             subplot_titles=("Daily PM2.5 Average", "Temperature & Humidity"))
     
-    # Add PM2.5 bars with gradient fill
+    # Add PM2.5 bar chart with error bars
     daily_fig.add_trace(
         go.Bar(x=daily_forecast['date'],
                y=daily_forecast['pm25_mean'],
                name='PM2.5',
-               marker=dict(
-                   color=colors,
-                   line=dict(color=colors, width=1)
-               ),
+               marker_color=colors,
                error_y=dict(
                    type='data',
                    symmetric=False,
                    array=daily_forecast['pm25_max'] - daily_forecast['pm25_mean'],
                    arrayminus=daily_forecast['pm25_mean'] - daily_forecast['pm25_min'],
                    color='rgba(255,255,255,0.3)'
-               ),
-               hovertemplate="<b>%{x}</b><br>" +
-                           "PM2.5: %{y:.1f} μg/m³<br>" +
-                           "Max: %{error_y.array:.1f}<br>" +
-                           "Min: %{error_y.arrayminus:.1f}<br>" +
-                           "<extra></extra>"),
+               )),
         row=1, col=1
     )
     
-    # Add temperature area
+    # Add temperature line with range
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['temp_mean'],
+                  name='Temperature',
+                  line=dict(color='#e74c3c'),
+                  mode='lines+markers'),
+        row=2, col=1
+    )
+    
     daily_fig.add_trace(
         go.Scatter(x=daily_forecast['date'],
                   y=daily_forecast['temp_max'],
-                  name='Temperature Range',
-                  line=dict(color='rgba(0,0,0,0)'),
+                  name='Temp Range',
+                  fill=None,
+                  mode='lines',
+                  line=dict(width=0),
                   showlegend=False),
         row=2, col=1
     )
@@ -466,22 +448,32 @@ def update_pm25_graphs(n, selected_date):
     daily_fig.add_trace(
         go.Scatter(x=daily_forecast['date'],
                   y=daily_forecast['temp_min'],
-                  name='Temperature',
+                  name='Temp Range',
                   fill='tonexty',
-                  fillcolor='rgba(255,152,0,0.2)',
-                  line=dict(color='rgba(255,152,0,0.', width=2),
-                  hovertemplate="<b>%{x}</b><br>" +
-                              "Temperature: %{y:.1f}°C<br>" +
-                              "<extra></extra>"),
+                  mode='lines',
+                  line=dict(width=0),
+                  fillcolor='rgba(231, 76, 60, 0.2)',
+                  showlegend=False),
         row=2, col=1
     )
     
-    # Add humidity area
+    # Add humidity line with range
+    daily_fig.add_trace(
+        go.Scatter(x=daily_forecast['date'],
+                  y=daily_forecast['humidity_mean'],
+                  name='Humidity',
+                  line=dict(color='#2ecc71'),
+                  mode='lines+markers'),
+        row=2, col=1
+    )
+    
     daily_fig.add_trace(
         go.Scatter(x=daily_forecast['date'],
                   y=daily_forecast['humidity_max'],
                   name='Humidity Range',
-                  line=dict(color='rgba(0,0,0,0)'),
+                  fill=None,
+                  mode='lines',
+                  line=dict(width=0),
                   showlegend=False),
         row=2, col=1
     )
@@ -489,151 +481,111 @@ def update_pm25_graphs(n, selected_date):
     daily_fig.add_trace(
         go.Scatter(x=daily_forecast['date'],
                   y=daily_forecast['humidity_min'],
-                  name='Humidity',
+                  name='Humidity Range',
                   fill='tonexty',
-                  fillcolor='rgba(0,188,212,0.2)',
-                  line=dict(color='rgba(0,188,212,0.', width=2),
-                  hovertemplate="<b>%{x}</b><br>" +
-                              "Humidity: %{y:.1f}%<br>" +
-                              "<extra></extra>"),
+                  mode='lines',
+                  line=dict(width=0),
+                  fillcolor='rgba(46, 204, 113, 0.2)',
+                  showlegend=False),
         row=2, col=1
     )
     
     # Add reference lines for air quality levels
-    for level, info in PM25_LEVELS.items():
-        if info['range'][1] != float('inf'):
-            daily_fig.add_shape(
-                type="line",
-                x0=daily_forecast['date'].min(),
-                y0=info['range'][1],
-                x1=daily_forecast['date'].max(),
-                y1=info['range'][1],
-                line=dict(color=info['color'], width=1, dash="dot"),
-                row=1, col=1
-            )
-            daily_fig.add_annotation(
-                x=daily_forecast['date'].max(),
-                y=info['range'][1],
-                text=level,
-                showarrow=False,
-                xanchor="left",
-                xshift=10,
-                font=dict(size=10, color=info['color']),
-                row=1, col=1
-            )
+    reference_levels = [
+        (12.0, "Good", "#00E400"),
+        (35.4, "Moderate", "#FFFF00"),
+        (55.4, "Unhealthy for Sensitive Groups", "#FF7E00"),
+        (150.4, "Unhealthy", "#FF0000")
+    ]
     
-    # Update layout
+    for level, label, color in reference_levels:
+        daily_fig.add_shape(
+            type="line",
+            x0=daily_forecast['date'].min(),
+            y0=level,
+            x1=daily_forecast['date'].max(),
+            y1=level,
+            line=dict(color=color, width=1, dash="dash"),
+            row=1, col=1
+        )
+        daily_fig.add_annotation(
+            x=daily_forecast['date'].max(),
+            y=level,
+            xref="x",
+            yref="y",
+            text=label,
+            showarrow=False,
+            xanchor="right",
+            font=dict(size=10, color=color),
+            bgcolor="rgba(0, 0, 0, 0.7)",
+            borderpad=2,
+            row=1, col=1
+        )
+    
     daily_fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
         height=600,
         showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            bgcolor='rgba(0,0,0,0.5)'
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=40, r=40, t=60, b=40)
     )
     
-    daily_fig.update_xaxes(
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='rgba(255,255,255,0.1)',
-        title_text="Date",
-        row=2, col=1
-    )
-    
-    daily_fig.update_yaxes(
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='rgba(255,255,255,0.1)',
-        title_text="PM2.5 (μg/m³)",
-        row=1, col=1
-    )
-    
-    daily_fig.update_yaxes(
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='rgba(255,255,255,0.1)',
-        title_text="Value",
-        row=2, col=1
-    )
+    daily_fig.update_xaxes(title_text="Date", row=2, col=1)
+    daily_fig.update_yaxes(title_text="PM2.5 (μg/m³)", row=1, col=1)
+    daily_fig.update_yaxes(title_text="Value", row=2, col=1)
     
     # Hourly forecast graph
-    if selected_date:
-        selected_date = datetime.strptime(selected_date, '%Y-%m-%d').date()
-        hourly_data = forecast_data[forecast_data['date'] == selected_date]
-    else:
-        hourly_data = forecast_data[forecast_data['date'] == forecast_data['date'].min()]
-    
     hourly_fig = go.Figure()
     
     # Add bars for PM2.5 levels with quality colors
     hourly_fig.add_trace(
-        go.Bar(x=hourly_data['hour'],
-               y=hourly_data['pm_2_5'],
+        go.Bar(x=forecast_data['timestamp'],
+               y=forecast_data['pm_2_5'],
                name='PM2.5',
-               marker=dict(
-                   color=[PM25_LEVELS[q]['color'] for q in hourly_data['quality']],
-                   line=dict(color=[PM25_LEVELS[q]['color'] for q in hourly_data['quality']], width=1)
-               ),
-               hovertemplate="Hour: %{x}:00<br>" +
-                           "PM2.5: %{y:.1f} μg/m³<br>" +
-                           "Quality: %{text}<br>" +
-                           "<extra></extra>",
-               text=hourly_data['quality'])
+               marker_color=[PM25_LEVELS[q]['color'] for q in forecast_data['quality']],
+               hovertemplate='Time: %{x}<br>PM2.5: %{y:.1f} μg/m³<br>Quality: %{text}<extra></extra>',
+               text=forecast_data['quality'])
     )
     
-    # Add smooth line for trend
+    # Add line for trend
     hourly_fig.add_trace(
-        go.Scatter(x=hourly_data['hour'],
-                  y=hourly_data['pm_2_5'],
+        go.Scatter(x=forecast_data['timestamp'],
+                  y=forecast_data['pm_2_5'],
                   mode='lines',
-                  line=dict(shape='spline', color='rgba(255,255,255,0.5)', width=2),
+                  line=dict(color='rgba(255,255,255,0.5)', width=2),
                   name='Trend',
                   hoverinfo='skip')
     )
     
-    # Add reference lines
-    for level, info in PM25_LEVELS.items():
-        if info['range'][1] != float('inf'):
-            hourly_fig.add_shape(
-                type="line",
-                x0=-0.5,
-                y0=info['range'][1],
-                x1=23.5,
-                y1=info['range'][1],
-                line=dict(color=info['color'], width=1, dash="dot")
-            )
+    # Add reference lines for air quality levels
+    for level, label, color in reference_levels:
+        hourly_fig.add_shape(
+            type="line",
+            x0=forecast_data['timestamp'].min(),
+            y0=level,
+            x1=forecast_data['timestamp'].max(),
+            y1=level,
+            line=dict(color=color, width=1, dash="dash")
+        )
+        hourly_fig.add_annotation(
+            x=forecast_data['timestamp'].max(),
+            y=level,
+            text=label,
+            showarrow=False,
+            xanchor="right",
+            font=dict(size=10, color=color),
+            bgcolor="rgba(0, 0, 0, 0.7)",
+            borderpad=2
+        )
     
-    # Update layout
     hourly_fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        title=f"Hourly PM2.5 Levels - {hourly_data['day'].iloc[0]}, {selected_date}",
-        xaxis=dict(
-            title="Hour of Day",
-            tickmode='array',
-            tickvals=list(range(0, 24, 2)),
-            ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
-        ),
-        yaxis=dict(
-            title="PM2.5 (μg/m³)",
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
-        ),
+        title="Hourly PM2.5 Forecast",
+        xaxis_title="Time",
+        yaxis_title="PM2.5 (μg/m³)",
         height=400,
-        showlegend=False,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=40, r=40, t=80, b=40),
         hovermode='x unified'
     )
@@ -720,4 +672,4 @@ def update_rainfall_graphs(n_clicks, temp, humidity, wind_speed, wind_component)
 if __name__ == '__main__':
     print("Starting the dashboard server...")
     print("Please open http://127.0.0.1:8050 in your web browser")
-    app.run_server(debug=True, host='0.0.0.0', port=8050) 
+    app.run_server(debug=True, host='0.0.0.0', port=8050)
