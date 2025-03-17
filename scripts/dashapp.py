@@ -10,21 +10,21 @@ import numpy as np
 import random
 
 # Load models and data
-pm25_model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\best_model')
-rainfall_model = load_model(r'C:\Users\ASUS\Desktop\projectforecastpm2_5\models\rainny_model')
+pm25_model = load_model(r'models\best_model') # นำเข้าเองไฟล์ path model ของ best
+rainfall_model = load_model(r'models\rainny_model') # นำเข้าเองไฟล์ path model ของ rainny
 
 # Load PM2.5 data
-pm25_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\last_test.csv"
+pm25_file_path = r"dataforecast\last_test.csv" # นำเข้าเองไฟล์ path ของ last_test
 pm25_df = pd.read_csv(pm25_file_path)
 pm25_df['timestamp'] = pd.to_datetime(pm25_df['timestamp'])
 
 # Load external data for PM2.5
-external_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\cleandata_hours.csv"
+external_file_path = r"dataforecast\cleandata_hours.csv" # นำเข้าเองไฟล์ path  ของ cleandata_hours
 external_data = pd.read_csv(external_file_path)
 external_data['timestamp'] = pd.to_datetime(external_data['timestamp'])
 
 # Load rainfall data
-rainfall_file_path = r"C:\Users\ASUS\Desktop\projectforecastpm2_5\dataforecast\raw_data\raindata.csv"
+rainfall_file_path = r"dataforecast\raindata.csv" # นำเข้าเองไฟล์ path ของ raindata
 rainfall_df = pd.read_csv(rainfall_file_path)
 rainfall_df['DATE'] = pd.to_datetime(rainfall_df['DATE'])
 
